@@ -1,6 +1,6 @@
 import numpy as np
 from typing import Optional, List, Tuple
-
+import torch
 from tqdm.notebook import trange, tqdm
 from omegaconf import OmegaConf, DictConfig
 
@@ -108,3 +108,45 @@ class SearchAlgorithm:
 
     def play_game(self, game: Maze, max_iters = 1000, verbose=True, visualize=True):
         raise NotImplementedError
+    
+    def query_model(self, node: Node) -> Tuple[np.ndarray, float]:
+        tensor_obs = torch.tensor(node.get_spatial_history(), dtype=torch.float32, device=self.model.device).unsqueeze(0)
+        tensor_scalar_features = torch.tensor(node.get_scalar_history(), dtype=torch.float32, device=self.model.device).unsqueeze(0)
+        # Query the model for the policy and value
+        policy, value = self.model(
+            tensor_obs, tensor_scalar_features
+            )
+        
+        value = value.item()
+        normalized_policy = torch.softmax(policy, axis=1).squeeze(0).detach().cpu().numpy()
+        return normalized_policy, value
+
+class GreedyAlgorithm(SearchAlgorithm):
+    """Uses the network policy directly to select the best action. Does not perform any search.
+    Does not use the values predicted by the network."""
+
+    def play_game(self, game: Maze, max_iters = 1000, verbose=True, visualize=True):
+        path = []
+        node = Node(game.get_initial_state(), game, history_length=self.model.history_length)
+        for i in range(max_iters):
+            path.append((node.state.x, node.state.y))
+            policy, _ = self.query_model(node)
+            action = np.argmax(policy)
+            
+            node = Node(game.get_next_state(node.state, action), game, parent=node, last_action=action)
+
+            final_reward, terminated = game.get_value_and_terminated(node.state)
+            if terminated:
+                path.append((node.state.x, node.state.y))
+                
+                if verbose:
+                    if (node.state.x, node.state.y) == game.target:
+                        print(f"Reached target in {i+1} steps")
+                    else:
+                        print(f"Terminated due to timeout in {i+1} steps")
+                if visualize:
+                    game.visualize_path(path)
+                
+                return path, final_reward
+            
+

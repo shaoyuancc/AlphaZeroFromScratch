@@ -11,6 +11,7 @@ class ResNet(nn.Module):
 
         OBSERVATION_WIDTH = 5
         ACTION_SIZE = 4
+        self.history_length = model_cfg.history_length
 
         SCALAR_FEATURES_SIZE = 3*model_cfg.history_length + 2  # see Maze.get_encoded_scalar_features
         num_filters = model_cfg.num_filters
