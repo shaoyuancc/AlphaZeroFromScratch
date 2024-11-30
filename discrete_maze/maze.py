@@ -290,7 +290,7 @@ class Maze:
         else:
             self.visualize_state(map)
 
-    def visualize_state(self, map: Optional[np.ndarray] = None, cell_size: float = 0.5, base_font_size: float = 14, add_colorbar: bool = False):
+    def visualize_state(self, map: Optional[np.ndarray] = None, cell_size: float = 0.2, base_font_size: float = 14, add_colorbar: bool = False):
         if map is None:
             map = self.map
 

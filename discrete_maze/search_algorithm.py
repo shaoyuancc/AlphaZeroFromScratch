@@ -1,3 +1,4 @@
+from enum import Enum
 import numpy as np
 from typing import Optional, List, Tuple
 import torch
@@ -89,16 +90,21 @@ class Node:
         # self.scalar_features_history shape: (hist_len, scalar_feature_size)
         return np.concatenate((self.scalar_features_history.flatten('F'), self.game.get_normalized_target_position()))
     
+    @classmethod
+    def from_parent(cls, parent: "Node", action: int):
+        next_state = parent.game.get_next_state(parent.state, action)
+        return cls(next_state, parent.game, parent=parent, last_action=action)
+    
 
 class GameEpisode:
     """Stateful episode of a game"""
-    def __init__(self, game: Maze):
+    def __init__(self, game: Maze, history_length: int):
         self.game = game
         self.state: Maze.State = game.get_initial_state()
         self.memory = []
         self.reward_history = []
-        self.root: Optional[Node] = Node(self.state, self.game)
-        self.node: Optional[Node] = None
+        self.root: Optional[Node] = Node(self.state, self.game, history_length=history_length)
+        self.node: Optional[Node] = None # Node marked for expansion and/or evaluation
 
 
 class SearchAlgorithm:
@@ -110,16 +116,35 @@ class SearchAlgorithm:
         raise NotImplementedError
     
     def query_model(self, node: Node) -> Tuple[np.ndarray, float]:
-        tensor_obs = torch.tensor(node.get_spatial_history(), dtype=torch.float32, device=self.model.device).unsqueeze(0)
+        tensor_spatial_history = torch.tensor(node.get_spatial_history(), dtype=torch.float32, device=self.model.device).unsqueeze(0)
         tensor_scalar_features = torch.tensor(node.get_scalar_history(), dtype=torch.float32, device=self.model.device).unsqueeze(0)
         # Query the model for the policy and value
         policy, value = self.model(
-            tensor_obs, tensor_scalar_features
+            tensor_spatial_history, tensor_scalar_features
             )
         
         value = value.item()
         normalized_policy = torch.softmax(policy, axis=1).squeeze(0).detach().cpu().numpy()
         return normalized_policy, value
+    
+    def batch_query_model(self, nodes: List[Node]) -> Tuple[np.ndarray, np.ndarray]:
+        spatial_histories = np.stack([node.get_spatial_history() for node in nodes], axis=0)
+        scalar_histories = np.stack([node.get_scalar_history() for node in nodes], axis=0)
+        tensor_spatial_histories = torch.tensor(spatial_histories, dtype=torch.float32, device=self.model.device)
+        tensor_scalar_histories = torch.tensor(scalar_histories, dtype=torch.float32, device=self.model.device)
+        # Query the model for the policy and value
+        policies, values = self.model(
+            tensor_spatial_histories, tensor_scalar_histories
+            )
+        policies = torch.softmax(policies, axis=1).detach().cpu().numpy()
+        values = values.squeeze(1).detach().cpu().numpy()
+        return policies, values
+    
+    # Define an enum for possible termination cases
+    class TerminationCase(Enum):
+        TARGET_REACHED = 0
+        TIMEOUT = 1
+        COLLISION = 2
 
 class GreedyAlgorithm(SearchAlgorithm):
     """Uses the network policy directly to select the best action. Does not perform any search.
@@ -132,21 +157,63 @@ class GreedyAlgorithm(SearchAlgorithm):
             path.append((node.state.x, node.state.y))
             policy, _ = self.query_model(node)
             action = np.argmax(policy)
+
+            if action not in node.valid_actions:
+                if verbose:
+                    print(f"Crashed at {i+1}th step.")
+                if visualize:
+                    game.visualize_path(path)
+                return SearchAlgorithm.TerminationCase.COLLISION, np.nan
             
             node = Node(game.get_next_state(node.state, action), game, parent=node, last_action=action)
 
             final_reward, terminated = game.get_value_and_terminated(node.state)
             if terminated:
                 path.append((node.state.x, node.state.y))
-                
-                if verbose:
-                    if (node.state.x, node.state.y) == game.target:
-                        print(f"Reached target in {i+1} steps")
-                    else:
-                        print(f"Terminated due to timeout in {i+1} steps")
                 if visualize:
                     game.visualize_path(path)
+                if (node.state.x, node.state.y) == game.target:
+                    if verbose:
+                        print(f"Reached target in {i+1} steps")
+                    return SearchAlgorithm.TerminationCase.TARGET_REACHED, len(path)/len(game.shortest_path)
+                else:
+                    if verbose:
+                        print(f"Terminated due to timeout in {i+1} steps")
+                    return SearchAlgorithm.TerminationCase.TIMEOUT, np.nan
+    
+    def play_game_batch(self, games: List[Maze], max_iters = 1000, verbose=True, visualize=True):
+        nodes = [Node(game.get_initial_state(), game, history_length=self.model.history_length) for game in games]
+        for node in nodes:
+            node.path_length = 1
+        results = []
+        
+        while len(nodes) > 0:
+            policies, _ = self.batch_query_model(nodes)
+
+            # Serially process the episodes
+            for i in range(len(nodes))[::-1]:
+                node = nodes[i]
+                policy = policies[i]
+
+                action = np.argmax(policy)
+                if action not in node.valid_actions:
+                    results.append((SearchAlgorithm.TerminationCase.COLLISION, np.nan))
+                    del nodes[i]
+                    continue
+
+                next_node: Node = Node.from_parent(parent=node, action=action)
+                next_node.path_length = node.path_length + 1
+                nodes[i] = next_node
+
+                final_reward, terminated = next_node.game.get_value_and_terminated(next_node.state)
+                if terminated:
+                    if (next_node.state.x, next_node.state.y) == next_node.game.target:
+                        results.append((SearchAlgorithm.TerminationCase.TARGET_REACHED,next_node.path_length/len(next_node.game.shortest_path)))
+                    else:
+                        results.append((SearchAlgorithm.TerminationCase.TIMEOUT, np.nan))
+                    del nodes[i]
                 
-                return path, final_reward
+        return results
+
             
 
