@@ -1,4 +1,5 @@
 import heapq
+from matplotlib.patches import Rectangle
 import numpy as np
 from typing import Optional, List, Tuple
 import matplotlib.pyplot as plt
@@ -289,6 +290,64 @@ class Maze:
             return map
         else:
             self.visualize_state(map)
+    
+    def visualize_path_and_evaluations(self, path, evaluations, cell_size: float = 0.2, base_font_size: float = 14, add_colorbar: bool = False ):
+        map = self.map
+        # Get the dimensions of the map
+        map_height, map_width = map.shape  # shape gives (rows, columns)
+
+        # Calculate figure size
+        fig_width = max(6, map_width * cell_size)
+        fig_height = max(6, map_height * cell_size)
+        # Create a figure and axis
+        fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+        # ----------------------
+        # Calculate Scaling Factor for Fonts
+        # ----------------------
+        # Base font size corresponds to a standard figure size (e.g., 6 inches)
+        standard_fig_size = 6  # inches
+        # Scaling factor based on figure dimensions
+        scaling_factor = min(fig_height / standard_fig_size, fig_width / standard_fig_size)
+        # Compute scaled font size
+        scaled_font_size = base_font_size * scaling_factor
+        # Optionally cap the maximum font size
+        max_font_size = 80
+        scaled_font_size = min(scaled_font_size, max_font_size)
+
+        # ----------------------
+        # Base Map: Free, Obstacles, Start, Goal
+        # ----------------------
+        # Copy map and convert to float to handle NaN
+        base_map = np.copy(map).astype(float)
+        # Mask out cells that are not free (0), obstacles (1), start (2), or goal (3)
+        base_map[base_map >= 4] = np.nan
+        cmap_base = mcolors.ListedColormap(['white', 'black', 'red', 'green'])
+        im_base = ax.imshow(base_map.T, cmap=cmap_base, vmin=0, vmax=3)
+
+        # ----------------------
+        # Trajectory Cells
+        # ----------------------
+        # Overlay hatching patterns
+        for (i, j) in path:
+            rect = Rectangle((i - 0.5, j - 0.5), 1, 1,
+                            linewidth=0.2, edgecolor='black', facecolor='none',
+                            hatch='///')  # Customize hatch pattern here
+            ax.add_patch(rect)
+        
+        # ----------------------
+        # Evaluation Values
+        # ----------------------
+        eval_min, eval_max = np.nanmin(evaluations), np.nanmax(evaluations)
+        # Use Normalize to map trajectory steps to colormap
+        norm = mcolors.Normalize(vmin=eval_min, vmax=eval_max)
+        # Plot the trajectory
+        im_evals = ax.imshow(evaluations.T, cmap=plt.cm.plasma, norm=norm, alpha=0.5)
+        cbar = fig.colorbar(im_evals, ax=ax)
+        cbar.set_label('num evaluations', fontsize=scaled_font_size)
+
+        plt.axis('off')
+        plt.show()
 
     def visualize_state(self, map: Optional[np.ndarray] = None, cell_size: float = 0.2, base_font_size: float = 14, add_colorbar: bool = False):
         if map is None:
@@ -364,8 +423,9 @@ class Maze:
         else:
             im_traj = None
 
-        plt.tick_params(axis='x', labelsize=scaled_font_size * 0.8)  # X-axis tick labels
-        plt.tick_params(axis='y', labelsize=scaled_font_size * 0.8)  # Y-axis tick labels
+        # plt.tick_params(axis='x', labelsize=scaled_font_size * 0.8)  # X-axis tick labels
+        # plt.tick_params(axis='y', labelsize=scaled_font_size * 0.8)  # Y-axis tick labels
+        plt.axis('off')
         
         plt.show()
 
@@ -395,21 +455,26 @@ class AStar:
         heapq.heappush(open, (0, self.start))
         came_from = {}
         g_score = {self.start: 0}
-
+        n_expansions = 0
+        n_evaluations = np.zeros(self.maze.map.shape)
+        n_evaluations[self.start] += 1
         while open:
             _, current = heapq.heappop(open)
-            
+            n_expansions += 1
             if current == self.goal:
                 path = [current]
                 while current in came_from:
                     current = came_from[current]
                     path.append(current)
                 path.reverse()
+                print(f"A* expanded {n_expansions} nodes")
+                self.maze.visualize_path_and_evaluations(path, n_evaluations)
                 return True, path  # Maze is solvable
 
             for successor in self.successors(current):
                 tentative_g_score = g_score[current] + 1
                 if successor not in g_score or tentative_g_score < g_score[successor]:
+                    n_evaluations[successor] += 1
                     came_from[successor] = current
                     g_score[successor] = tentative_g_score
                     f_score = tentative_g_score + self.heuristic(successor, self.goal)

@@ -4,14 +4,16 @@ from typing import Optional, List, Tuple
 import torch
 from tqdm.notebook import trange, tqdm
 from omegaconf import OmegaConf, DictConfig
+import heapq
 
 from discrete_maze.maze import Maze
 from discrete_maze.resnet import ResNet
 
 class Node:
     """Search node in the MCTS tree"""
-    def __init__(self, state, game: Maze, parent: "Node"=None, last_action=None, prior_prob=0, history_length: Optional[int]=None):
+    def __init__(self, state: Maze.State, game: Maze, parent: "Node"=None, last_action=None, prior_prob=0, history_length: Optional[int]=None):
         self.state = state
+        self.pos = (state.x, state.y)
         self.game = game
         self.parent = parent
         self.last_action = last_action
@@ -145,6 +147,7 @@ class SearchAlgorithm:
         TARGET_REACHED = 0
         TIMEOUT = 1
         COLLISION = 2
+        FAILED = 3
 
 class GreedyAlgorithm(SearchAlgorithm):
     """Uses the network policy directly to select the best action. Does not perform any search.
@@ -214,6 +217,57 @@ class GreedyAlgorithm(SearchAlgorithm):
                     del nodes[i]
                 
         return results
+    
+
+class LearnedAStar(SearchAlgorithm):
+    def __init__(self, search_cfg: DictConfig, model: ResNet):
+        self.cfg = search_cfg
+        self.model = model
+    
+    def play_game(self, game: Maze, verbose=True, visualize=True):
+        open = []
+        node = Node(game.get_initial_state(), game, history_length=self.model.history_length)
+        policy, value = self.query_model(node)
+        node.policy = policy
+        g_score = {node.pos: -node.state.reward}
+        heapq.heappush(open, (0, node))
+        n_expansions = 0
+        n_evaluations = np.zeros(game.map.shape)
+        n_evaluations[node.pos] += 1
+        while open:
+            _, node = heapq.heappop(open)
+            n_expansions += 1
+            if node.pos == game.target:
+                path = []
+                while True:
+                    path.append(node.pos)
+                    if node.parent is None:
+                        break
+                    node = node.parent
+                path.reverse()
+                if visualize:
+                    # game.visualize_path(path)
+                    game.visualize_path_and_evaluations(path, n_evaluations)
+                if verbose:
+                    print(f"LearnedAStar expanded {n_expansions} nodes")
+                return SearchAlgorithm.TerminationCase.TARGET_REACHED, len(path)/len(game.shortest_path)
+            
+            valid_policy_actions = [action for action in node.valid_actions if node.policy[action] > 0]
+            for action in valid_policy_actions:
+                child_node = Node.from_parent(node, action)
+                if child_node.pos not in g_score or  -child_node.state.reward < g_score[child_node.pos]:
+                    policy, value = self.query_model(child_node)
+                    n_evaluations[child_node.pos] += 1
+                    unnormalized_value = game.unnormalize_reward(value)
+                    child_node.policy = policy
+                    g_score[child_node.pos] = -child_node.state.reward
+                    f_score = - (unnormalized_value + child_node.state.reward)
+                    heapq.heappush(open, (f_score, child_node))
+        
+        return SearchAlgorithm.TerminationCase.FAILED, np.nan
+
+
+
 
             
 
