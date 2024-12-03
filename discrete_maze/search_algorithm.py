@@ -229,14 +229,19 @@ class LearnedAStar(SearchAlgorithm):
         node = Node(game.get_initial_state(), game, history_length=self.model.history_length)
         policy, value = self.query_model(node)
         node.policy = policy
+        node.reward_to_go = value
         g_score = {node.pos: -node.state.reward}
-        heapq.heappush(open, (0, node))
-        n_expansions = 0
+        h_score = np.full(game.map.shape, np.nan)
+        count = 0 # for tie-breaking
+        heapq.heappush(open, (0, count, node))
+        n_expansions = np.zeros(game.map.shape)
         n_evaluations = np.zeros(game.map.shape)
         n_evaluations[node.pos] += 1
+        
         while open:
-            _, node = heapq.heappop(open)
-            n_expansions += 1
+            _, _, node = heapq.heappop(open)
+            n_expansions[node.pos] += 1
+            h_score[node.pos] = node.reward_to_go
             if node.pos == game.target:
                 path = []
                 while True:
@@ -245,12 +250,22 @@ class LearnedAStar(SearchAlgorithm):
                         break
                     node = node.parent
                 path.reverse()
+                if verbose:
+                    print(f"LearnedAStar expanded {int(np.sum(n_expansions))} nodes")
                 if visualize:
                     # game.visualize_path(path)
-                    game.visualize_path_and_evaluations(path, n_evaluations)
-                if verbose:
-                    print(f"LearnedAStar expanded {n_expansions} nodes")
+                    # print("Evaluations:")
+                    # game.visualize_path_and_heatmap(path, n_evaluations, "num evaluations")
+                    game.visualize_path_and_heatmap(path, h_score, "predicted reward to go")
+                    # print("Expansions:")
+                    game.visualize_path_and_heatmap(path, n_expansions, "num expansions")
+                
                 return SearchAlgorithm.TerminationCase.TARGET_REACHED, len(path)/len(game.shortest_path)
+            
+            final_reward, terminated = game.get_value_and_terminated(node.state)
+            if terminated:
+                print("Terminal node reached, do not evaluate children")
+                continue
             
             valid_policy_actions = [action for action in node.valid_actions if node.policy[action] > 0]
             for action in valid_policy_actions:
@@ -260,11 +275,15 @@ class LearnedAStar(SearchAlgorithm):
                     n_evaluations[child_node.pos] += 1
                     unnormalized_value = game.unnormalize_reward(value)
                     child_node.policy = policy
+                    child_node.reward_to_go = value
                     g_score[child_node.pos] = -child_node.state.reward
+                    
                     f_score = - (unnormalized_value + child_node.state.reward)
-                    heapq.heappush(open, (f_score, child_node))
+                    count += 1
+                    heapq.heappush(open, (f_score, count, child_node))
         
         return SearchAlgorithm.TerminationCase.FAILED, np.nan
+
 
 
 

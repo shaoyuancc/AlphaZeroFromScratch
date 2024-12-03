@@ -5,17 +5,10 @@ from typing import Optional, List, Tuple
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from collections import namedtuple
-import random
 import copy
-import time
 
-import torch
-
-import torch.nn as nn
-import torch.nn.functional as F
 
 from tqdm.notebook import trange, tqdm
-import wandb
 from omegaconf import OmegaConf, DictConfig
 
 class Maze:
@@ -33,6 +26,11 @@ class Maze:
                  map: Optional[np.ndarray] = None, source: Optional[Tuple[int, int]] = None, target: Optional[Tuple[int, int]] = None, shortest_path: Optional[List[Tuple[int, int]]] = None):
         """Optionally pass in a map, source, target, and shortest path to avoid generating a new maze."""
         
+        if source is not None and target is not None:
+            assert source != target, "Source and target must be different"
+            assert source[0] > 0 and source[0] < width - 1 and source[1] > 0 and source[1] < height - 1, "Source must be within the maze"
+            assert target[0] > 0 and target[0] < width - 1 and target[1] > 0 and target[1] < height - 1, "Target must be within the maze"
+
         if cell_occupancy_prob is not None and width is not None and height is not None:
             assert 0 <= float(cell_occupancy_prob) < 1, "Cell occupancy probability must be in the range [0, 1)"
             assert int(width) > 2 and int(height) > 2, "Width and height must be greater than 2"
@@ -40,6 +38,8 @@ class Maze:
             self.height = int(height)
             self.seed = seed
             self.cell_occupancy_prob = float(cell_occupancy_prob)
+            self.source = source
+            self.target = target
             self.generate_map()
         elif map is not None:
             assert source is not None and target is not None and shortest_path is not None, "Must provide source, target, and shortest path if map is provided"
@@ -239,26 +239,27 @@ class Maze:
             map[:, 0] = 1
             map[:, -1] = 1
 
-            # Randomly select two unique non-border positions for the source and target
-            while True:
-                # Generate two random positions within the non-border range
-                source = (np.random.randint(1, self.width - 1), np.random.randint(1, self.height - 1))
-                target = (np.random.randint(1, self.width - 1), np.random.randint(1, self.height - 1))
-                
-                # Ensure the positions are unique
-                if source != target:
-                    break
+            if self.source is None and self.target is None:
+                # Randomly select two unique non-border positions for the source and target
+                while True:
+                    # Generate two random positions within the non-border range
+                    source = (np.random.randint(1, self.width - 1), np.random.randint(1, self.height - 1))
+                    target = (np.random.randint(1, self.width - 1), np.random.randint(1, self.height - 1))
+                    
+                    # Ensure the positions are unique
+                    if source != target:
+                        self.source = source
+                        self.target = target
+                        break
             
             # Make sure the source and target do not have obstacles
-            map[source] = 2
-            map[target] = 3
+            map[self.source] = 2
+            map[self.target] = 3
 
-            self.source = source
-            self.target = target
-
+            
             self.map = map
             astar = AStar(self)
-            success, self.shortest_path = astar.solve()
+            success, self.shortest_path = astar.solve(verbose=False)
             if success:
                 break
             if count % 20 == 0:
@@ -291,7 +292,7 @@ class Maze:
         else:
             self.visualize_state(map)
     
-    def visualize_path_and_evaluations(self, path, evaluations, cell_size: float = 0.2, base_font_size: float = 14, add_colorbar: bool = False ):
+    def visualize_path_and_heatmap(self, path, evaluations, name, cell_size: float = 0.2, base_font_size: float = 14, add_colorbar: bool = False ):
         map = self.map
         # Get the dimensions of the map
         map_height, map_width = map.shape  # shape gives (rows, columns)
@@ -338,13 +339,18 @@ class Maze:
         # ----------------------
         # Evaluation Values
         # ----------------------
-        eval_min, eval_max = np.nanmin(evaluations), np.nanmax(evaluations)
+        eval_max = np.nanmax(evaluations)
+        eval_min = np.nanmin(evaluations)
+        if eval_min == 0:
+            eval_min = 1
         # Use Normalize to map trajectory steps to colormap
         norm = mcolors.Normalize(vmin=eval_min, vmax=eval_max)
+        cmap = plt.cm.plasma
+        cmap.set_under(color='none')
         # Plot the trajectory
-        im_evals = ax.imshow(evaluations.T, cmap=plt.cm.plasma, norm=norm, alpha=0.5)
+        im_evals = ax.imshow(evaluations.T, cmap=cmap, norm=norm, alpha=0.5)
         cbar = fig.colorbar(im_evals, ax=ax)
-        cbar.set_label('num evaluations', fontsize=scaled_font_size)
+        cbar.set_label(name, fontsize=scaled_font_size)
 
         plt.axis('off')
         plt.show()
@@ -440,6 +446,7 @@ class AStar:
         # Manhattan distance
         return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
+
     def successors(self, pos: Tuple[int, int]) -> List[Tuple[int, int]]:
         x, y = pos
         successors = []
@@ -450,25 +457,27 @@ class AStar:
                 successors.append((nx, ny))
         return successors
 
-    def solve(self) -> bool:
+    def solve(self, verbose=True, use_heuristic=True) -> bool:
         open = []
         heapq.heappush(open, (0, self.start))
         came_from = {}
         g_score = {self.start: 0}
-        n_expansions = 0
+        n_expansions = np.zeros(self.maze.map.shape)
         n_evaluations = np.zeros(self.maze.map.shape)
         n_evaluations[self.start] += 1
         while open:
             _, current = heapq.heappop(open)
-            n_expansions += 1
+            n_expansions[current] += 1
             if current == self.goal:
                 path = [current]
                 while current in came_from:
                     current = came_from[current]
                     path.append(current)
                 path.reverse()
-                print(f"A* expanded {n_expansions} nodes")
-                self.maze.visualize_path_and_evaluations(path, n_evaluations)
+                if verbose:
+                    print(f"A* expanded {int(np.sum(n_expansions))} nodes")
+                    # self.maze.visualize_path_and_heatmap(path, n_evaluations, "num evaluations")
+                    self.maze.visualize_path_and_heatmap(path, n_expansions, "num expansions")
                 return True, path  # Maze is solvable
 
             for successor in self.successors(current):
@@ -477,7 +486,25 @@ class AStar:
                     n_evaluations[successor] += 1
                     came_from[successor] = current
                     g_score[successor] = tentative_g_score
-                    f_score = tentative_g_score + self.heuristic(successor, self.goal)
+                    if use_heuristic:
+                        f_score = tentative_g_score + self.heuristic(successor, self.goal)
+                    else:
+                        f_score = tentative_g_score
                     heapq.heappush(open, (f_score, successor))
 
         return False, []  # Maze is not solvable
+    
+    def visualize_reward_to_go(self):
+        h_score = np.full(self.maze.map.shape, np.nan)
+        for i in range(self.width):
+            for j in range(self.height):
+                if self.maze.map[i, j] == 1:
+                    continue
+                self.start = (i, j)
+                is_success, path = self.solve(verbose=False)
+                if is_success:
+                    h_score[i, j] = self.maze.normalize_reward((len(path)-1)*Maze.MOVE_REWARD + Maze.TARGET_REWARD)
+
+        self.start = self.maze.source
+        _, path = self.solve(verbose=False)
+        self.maze.visualize_path_and_heatmap(path, h_score, "true reward to go")
