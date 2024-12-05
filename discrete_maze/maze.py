@@ -108,6 +108,8 @@ class Maze:
             dr += Maze.TARGET_REWARD
         elif state.steps_left == 1:
             dr += Maze.TIMEOUT_REWARD
+        if state.steps_left - 1 < 0:
+            raise ValueError("Steps left cannot be negative")
         return Maze.State(state.x + dx, state.y + dy, state.steps_left - 1, state.reward + dr)
     
     def get_encoded_observation(self, state: State):
@@ -292,8 +294,43 @@ class Maze:
         else:
             self.visualize_state(map)
     
-    def visualize_path_and_heatmap(self, path, evaluations, name, cell_size: float = 0.2, base_font_size: float = 14, add_colorbar: bool = False ):
-        map = self.map
+    def visualize_path_and_heatmap(self, path, evaluations, name):
+        fig, ax, scaled_font_size = self.visualize_basemap(self.map)
+        
+
+        # ----------------------
+        # Trajectory Cells
+        # ----------------------
+        # Overlay hatching patterns
+        if path is not None:
+            for (i, j) in path:
+                rect = Rectangle((i - 0.5, j - 0.5), 1, 1,
+                                linewidth=0.2, edgecolor='black', facecolor='none',
+                                hatch='///')  # Customize hatch pattern here
+                ax.add_patch(rect)
+        
+        # ----------------------
+        # Evaluation Values
+        # ----------------------
+        eval_max = np.nanmax(evaluations)
+        eval_min = np.nanmin(evaluations)
+        if eval_min == 0:
+            eval_min = 1
+        # Use Normalize to map trajectory steps to colormap
+        norm = mcolors.Normalize(vmin=eval_min, vmax=eval_max)
+        cmap = plt.cm.plasma
+        cmap.set_under(color='none')
+        # Plot the trajectory
+        im_evals = ax.imshow(evaluations.T, cmap=cmap, norm=norm, alpha=0.5)
+        cbar = fig.colorbar(im_evals, ax=ax)
+        cbar.set_label(name, fontsize=scaled_font_size)
+
+        # plt.tick_params(axis='x', labelsize=scaled_font_size * 0.8)  # X-axis tick labels
+        # plt.tick_params(axis='y', labelsize=scaled_font_size * 0.8)  # Y-axis tick labels
+        plt.axis('off')
+        plt.show()
+    
+    def visualize_basemap(self, map: Optional[np.ndarray] = None, cell_size: float = 0.2, base_font_size: float = 14, add_colorbar: bool = False):
         # Get the dimensions of the map
         map_height, map_width = map.shape  # shape gives (rows, columns)
 
@@ -325,35 +362,39 @@ class Maze:
         base_map[base_map >= 4] = np.nan
         cmap_base = mcolors.ListedColormap(['white', 'black', 'red', 'green'])
         im_base = ax.imshow(base_map.T, cmap=cmap_base, vmin=0, vmax=3)
-
-        # ----------------------
-        # Trajectory Cells
-        # ----------------------
-        # Overlay hatching patterns
-        for (i, j) in path:
-            rect = Rectangle((i - 0.5, j - 0.5), 1, 1,
-                            linewidth=0.2, edgecolor='black', facecolor='none',
-                            hatch='///')  # Customize hatch pattern here
-            ax.add_patch(rect)
         
-        # ----------------------
-        # Evaluation Values
-        # ----------------------
-        eval_max = np.nanmax(evaluations)
-        eval_min = np.nanmin(evaluations)
-        if eval_min == 0:
-            eval_min = 1
-        # Use Normalize to map trajectory steps to colormap
-        norm = mcolors.Normalize(vmin=eval_min, vmax=eval_max)
-        cmap = plt.cm.plasma
-        cmap.set_under(color='none')
-        # Plot the trajectory
-        im_evals = ax.imshow(evaluations.T, cmap=cmap, norm=norm, alpha=0.5)
-        cbar = fig.colorbar(im_evals, ax=ax)
-        cbar.set_label(name, fontsize=scaled_font_size)
+        return fig, ax, scaled_font_size
+    
+    def visualize_action_map(self, action_map: np.ndarray):
+        assert action_map.shape == self.map.shape, "Action map must have the same shape as the maze map"
+        fig, ax, scaled_font_size = self.visualize_basemap(self.map)
+        action_map = action_map.T # Transpose for plotting
+        nrows, ncols = action_map.shape
+        
+        # Create grid coordinates at the center of each cell
+        X, Y = np.meshgrid(np.arange(ncols), np.arange(nrows))
 
-        plt.axis('off')
+        # Initialize U and V components of arrows
+        U = np.zeros_like(action_map, dtype=float)
+        V = np.zeros_like(action_map, dtype=float)
+
+        # Define the direction mapping
+        direction_mapping = {
+            0: (0, 0.5),   # Down
+            1: (0, -0.5),  # Up
+            2: (-0.5, 0),  # Left
+            3: (0.5, 0)    # Right
+        }
+
+        # Map the array values to U and V components
+        for direction, (u, v) in direction_mapping.items():
+            U[action_map == direction] = u
+            V[action_map == direction] = v
+
+        # Plot the arrows using quiver
+        ax.quiver(X, Y, U, V, angles='xy', scale_units='xy', pivot='middle', scale=1)
         plt.show()
+
 
     def visualize_state(self, map: Optional[np.ndarray] = None, cell_size: float = 0.2, base_font_size: float = 14, add_colorbar: bool = False):
         if map is None:
@@ -475,9 +516,9 @@ class AStar:
                     path.append(current)
                 path.reverse()
                 if verbose:
-                    print(f"A* expanded {int(np.sum(n_expansions))} nodes")
-                    # self.maze.visualize_path_and_heatmap(path, n_evaluations, "num evaluations")
-                    self.maze.visualize_path_and_heatmap(path, n_expansions, "num expansions")
+                    print(f"A* evaluated {int(np.sum(n_evaluations))} nodes")
+                    self.maze.visualize_path_and_heatmap(path, n_evaluations, "num evaluations")
+                    # self.maze.visualize_path_and_heatmap(path, n_expansions, "num expansions")
                 return True, path  # Maze is solvable
 
             for successor in self.successors(current):
@@ -506,5 +547,6 @@ class AStar:
                     h_score[i, j] = self.maze.normalize_reward((len(path)-1)*Maze.MOVE_REWARD + Maze.TARGET_REWARD)
 
         self.start = self.maze.source
+        self.goal = self.maze.target
         _, path = self.solve(verbose=False)
         self.maze.visualize_path_and_heatmap(path, h_score, "true reward to go")
